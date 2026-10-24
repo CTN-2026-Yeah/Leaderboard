@@ -39,12 +39,51 @@
   tr.mine { background: var(--mine); }
   tr.charted td:nth-child(3) { box-shadow: inset 3px 0 0 var(--accent); }
   .up { color: var(--up); } .down { color: var(--down); } .zero { color: var(--muted); }
+  td a { color: inherit; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
+  td a:hover { color: var(--accent); text-decoration-color: currentColor; }
+  .detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .detail-head h2 { margin: 0; font-size: 20px; }
+  .stats { display: flex; gap: 24px; flex-wrap: wrap; margin: 12px 0 16px; }
+  .stat b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg button, .btn { border: 0; background: var(--card); color: var(--text); padding: 6px 12px; font: inherit; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .btn { border: 1px solid var(--border); border-radius: 6px; }
+  .history { max-height: 420px; overflow-y: auto; margin-top: 16px; }
 </style>
 </head>
 <body>
 <main>
   <h1>CTN Leaderboard Tracker</h1>
   <p class="sub" id="sub">Loading…</p>
+
+  <div class="card" id="detail" hidden>
+    <div class="detail-head">
+      <div>
+        <h2 id="d-name"></h2>
+        <div class="sub" id="d-meta" style="margin:2px 0 0"></div>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <div class="seg" id="d-range">
+          <button data-h="24">24h</button><button data-h="72">3d</button><button data-h="168">7d</button><button data-h="0">All</button>
+        </div>
+        <button class="btn" id="d-close">✕ Close</button>
+      </div>
+    </div>
+    <div class="stats" id="d-stats"></div>
+    <div class="chart-wrap"><canvas id="d-chart"></canvas></div>
+    <div class="history scroll">
+      <table>
+        <thead><tr>
+          <th class="l">Time</th><th>Score</th><th title="Change since previous snapshot">Δ</th>
+          <th title="Points per hour since previous snapshot">pts/h</th><th>Rank</th><th>Δ rank</th>
+        </tr></thead>
+        <tbody id="d-rows"></tbody>
+      </table>
+    </div>
+  </div>
 
   <div class="card">
     <div class="chart-wrap"><canvas id="chart"></canvas></div>
@@ -98,9 +137,10 @@ function snapshotAgo(hours) {
 
 // Standard competition ranking: 1 + number of teams with a strictly higher score.
 function ranks(scores) {
-  const vals = Object.values(scores).sort((a, b) => b - a);
+  const firstIndex = new Map();
+  Object.values(scores).sort((a, b) => b - a).forEach((v, i) => firstIndex.has(v) || firstIndex.set(v, i));
   const out = {};
-  for (const [n, v] of Object.entries(scores)) out[n] = vals.findIndex(x => x === v) + 1;
+  for (const [n, v] of Object.entries(scores)) out[n] = firstIndex.get(v) + 1;
   return out;
 }
 
@@ -148,7 +188,7 @@ function render() {
     <tr data-name="${esc(r.name)}" class="${r.name === MY_TEAM ? "mine" : ""} ${charted.has(r.name) ? "charted" : ""}">
       <td>${r.rank}</td>
       <td class="${cls(r.rankChange)}">${rc(r.rankChange)}</td>
-      <td class="l">${esc(r.name)}</td>
+      <td class="l"><a href="#team=${encodeURIComponent(r.name)}" title="Show full history">${esc(r.name)}</a></td>
       <td class="l uni" title="${esc(r.uni)}">${esc(r.uni)}</td>
       <td>${r.score.toLocaleString()}</td>
       <td class="${cls(r.d1)}">${fmtDelta(r.d1)}</td>
@@ -157,7 +197,7 @@ function render() {
       <td class="${cls(r.rate)}">${r.rate == null ? "—" : r.rate.toLocaleString()}</td>
     </tr>`).join("");
 
-  document.querySelectorAll("th").forEach(th => {
+  document.querySelectorAll("th[data-key]").forEach(th => {
     th.classList.toggle("sorted", th.dataset.key === sortKey);
     th.dataset.dir = sortDir === 1 ? "▲" : "▼";
   });
@@ -195,7 +235,113 @@ function drawChart() {
   });
 }
 
-document.querySelector("thead").addEventListener("click", e => {
+const rankCache = new Map();
+const rankAt = s => rankCache.get(s) || rankCache.set(s, ranks(s.scores)).get(s);
+const fmtDate = ms => new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+let detailHours = 0, detailChart; // 0 = all history
+
+// Every snapshot for one team, with change vs the previous snapshot.
+function teamHistory(name) {
+  const all = snaps.filter(s => name in s.scores);
+  return all.map((s, i) => {
+    const prev = all[i - 1], score = s.scores[name], rank = rankAt(s)[name];
+    const hours = prev ? (s.ms - prev.ms) / 3600e3 : 0;
+    return {
+      ms: s.ms, score, rank,
+      d: prev ? score - prev.scores[name] : null,
+      rate: prev && hours > 0 ? Math.round((score - prev.scores[name]) / hours) : null,
+      dRank: prev ? rankAt(prev)[name] - rank : null,
+    };
+  });
+}
+
+function showDetail() {
+  const card = document.getElementById("detail");
+  const m = location.hash.match(/^#team=(.+)$/);
+  const name = m ? decodeURIComponent(m[1]) : null;
+  if (!name || !latest || !(name in latest.scores)) { card.hidden = true; return; }
+
+  const wasHidden = card.hidden;
+  card.hidden = false;
+  const info = H.teams[name] || {};
+  document.getElementById("d-name").textContent = name;
+  document.getElementById("d-meta").textContent =
+    [info.uni, info.members ? `${info.members} member${info.members > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · ");
+  document.querySelectorAll("#d-range button").forEach(b => b.classList.toggle("on", +b.dataset.h === detailHours));
+
+  const hist = teamHistory(name);
+  const from = detailHours ? latest.ms - detailHours * 3600e3 - TOLERANCE_MS : -Infinity;
+  const view = hist.filter(e => e.ms >= from);
+  const first = view[0], last = view[view.length - 1];
+  const spanH = (last.ms - first.ms) / 3600e3;
+  const gained = last.score - first.score;
+  const best = Math.min(...view.map(e => e.rank)), worst = Math.max(...view.map(e => e.rank));
+  const stat = (v, label, c = "") => `<div class="stat"><b class="${c}">${v}</b><span>${label}</span></div>`;
+  document.getElementById("d-stats").innerHTML =
+    stat(last.score.toLocaleString(), "Score") +
+    stat(`#${last.rank}`, "Rank now") +
+    stat(view.length > 1 ? fmtDelta(gained) : "—", `Gained since ${fmtDate(first.ms)}`, cls(view.length > 1 ? gained : null)) +
+    stat(spanH > 0 ? Math.round(gained / spanH).toLocaleString() : "—", "Avg pts/h in range") +
+    stat(`#${best} – #${worst}`, "Best – worst rank in range");
+
+  const rc = v => v == null ? "—" : v > 0 ? `▲ ${v}` : v < 0 ? `▼ ${-v}` : "–";
+  document.getElementById("d-rows").innerHTML = [...view].reverse().map(e => `
+    <tr>
+      <td class="l">${fmtDate(e.ms)}</td>
+      <td>${e.score.toLocaleString()}</td>
+      <td class="${cls(e.d)}">${fmtDelta(e.d)}</td>
+      <td class="${cls(e.rate)}">${e.rate == null ? "—" : e.rate.toLocaleString()}</td>
+      <td>${e.rank}</td>
+      <td class="${cls(e.dRank)}">${rc(e.dRank)}</td>
+    </tr>`).join("");
+
+  drawDetailChart(name, view);
+  if (wasHidden) card.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function drawDetailChart(name, view) {
+  if (!window.Chart) return;
+  const css = getComputedStyle(document.documentElement);
+  const muted = css.getPropertyValue("--muted"), grid = css.getPropertyValue("--border");
+  if (detailChart) detailChart.destroy();
+  detailChart = new Chart(document.getElementById("d-chart"), {
+    type: "line",
+    data: {
+      labels: view.map(e => fmtDate(e.ms)),
+      datasets: [
+        { label: "Score", data: view.map(e => e.score), yAxisID: "y", borderColor: "#3b5bdb",
+          backgroundColor: "transparent", borderWidth: 2, pointRadius: view.length > 72 ? 0 : 2, tension: 0.2 },
+        { label: "Rank", data: view.map(e => e.rank), yAxisID: "y1", borderColor: "#f59f00",
+          backgroundColor: "transparent", borderWidth: 2, borderDash: [5, 4], pointRadius: 0, stepped: true },
+      ],
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { position: "bottom", labels: { color: muted, boxWidth: 12 } } },
+      scales: {
+        x: { ticks: { color: muted, maxTicksLimit: 10 }, grid: { color: grid } },
+        y: { position: "left", title: { display: true, text: "Score", color: muted }, ticks: { color: muted }, grid: { color: grid } },
+        y1: { position: "right", reverse: true, title: { display: true, text: "Rank", color: muted },
+              ticks: { color: muted, precision: 0 }, grid: { display: false } },
+      },
+    },
+  });
+}
+
+document.getElementById("d-range").addEventListener("click", e => {
+  const h = e.target.closest("button")?.dataset.h;
+  if (h == null) return;
+  detailHours = +h;
+  showDetail();
+});
+document.getElementById("d-close").addEventListener("click", () => {
+  history.pushState(null, "", location.pathname + location.search);
+  showDetail();
+});
+window.addEventListener("hashchange", showDetail);
+
+document.getElementById("rows").closest("table").querySelector("thead").addEventListener("click", e => {
   const key = e.target.closest("th")?.dataset.key;
   if (!key) return;
   if (key === sortKey) sortDir = -sortDir;
@@ -203,6 +349,7 @@ document.querySelector("thead").addEventListener("click", e => {
   render();
 });
 document.getElementById("rows").addEventListener("click", e => {
+  if (e.target.closest("a")) return; // team links open the history view instead
   const name = e.target.closest("tr")?.dataset.name;
   if (!name) return;
   charted.has(name) ? charted.delete(name) : charted.add(name);
@@ -210,7 +357,7 @@ document.getElementById("rows").addEventListener("click", e => {
 });
 document.getElementById("search").addEventListener("input", render);
 
-build(); render(); drawChart();
+build(); render(); drawChart(); showDetail();
 </script>
 </body>
 </html>
