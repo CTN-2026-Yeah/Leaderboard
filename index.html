@@ -113,7 +113,10 @@
   </div>
 </main>
 
-<script src="data/history.js"></script>
+<script>
+  // GitHub Pages lets browsers cache files for 10 minutes; a unique query string always gets fresh data.
+  document.write('<script src="data/history.js?v=' + Date.now() + '"><\/script>');
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script>
 const MY_TEAM = "Yeah";
