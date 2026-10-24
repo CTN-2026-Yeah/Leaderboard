@@ -8,28 +8,30 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - uses: actions/checkout@v5
       - name: Scrape
+        id: scrape
         env:
           CTN_EMAIL: ${{ secrets.CTN_EMAIL }}
           CTN_PASSWORD: ${{ secrets.CTN_PASSWORD }}
-        run: python scrape.py
+        run: python3 scrape.py
       - name: Commit new snapshot
+        if: steps.scrape.outputs.new_snapshot == 'true'
         run: |
-          # checked_at changes every run; only commit when a new snapshot was added
-          if git diff --quiet; then exit 0; fi
-          old=$(git show HEAD:data/history.json 2>/dev/null | python -c "import json,sys; print(len(json.load(sys.stdin)['snapshots']))" || echo 0)
-          new=$(python -c "import json; print(len(json.load(open('data/history.json'))['snapshots']))")
-          if [ "$old" = "$new" ]; then exit 0; fi
           git config user.name "leaderboard-bot"
           git config user.email "leaderboard-bot@users.noreply.github.com"
-          git add data/
+          git add data/history.json data/history.js
           git commit -m "Snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
-          git push
+          git pull --rebase origin main
+          if ! git push origin HEAD:main; then
+            echo "::error::Push was refused. In the organisation's Settings > Actions > General, set Workflow permissions to 'Read and write'."
+            exit 1
+          fi

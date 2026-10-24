@@ -137,11 +137,15 @@ def main():
     history["checked_at"] = now
 
     snaps = history["snapshots"]
-    if snaps and snaps[-1]["scores"] == scores:
-        print(f"{now}: no change ({len(scores)} teams)")
-    else:
+    changed = not snaps or snaps[-1]["scores"] != scores
+    if changed:
         snaps.append({"t": now, "scores": scores})
         print(f"{now}: new snapshot #{len(snaps)} ({len(scores)} teams)")
+    else:
+        print(f"{now}: no change ({len(scores)} teams)")
+    if os.environ.get("GITHUB_OUTPUT"):  # tells the workflow whether to commit
+        with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+            out.write(f"new_snapshot={'true' if changed else 'false'}\n")
 
     DATA_JSON.parent.mkdir(exist_ok=True)
     text = json.dumps(history, separators=(",", ":"), ensure_ascii=False)
