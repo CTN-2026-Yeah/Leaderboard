@@ -2,7 +2,8 @@ name: Scrape leaderboard
 
 on:
   schedule:
-    - cron: "*/15 * * * *" # GitHub may delay runs by a few minutes; only changed scores get committed
+    # Off the busy :00/:15 marks, where GitHub most often delays or drops scheduled runs
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
 permissions:
