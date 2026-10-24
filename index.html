@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTN Leaderboard Tracker</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #fff; --text: #1d1d1f; --muted: #6b6b70; --border: #e3e3e0;
+    --up: #138a43; --down: #c62828; --mine: #fff4c2; --hover: #f0f0ec; --accent: #3b5bdb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141416; --card: #1d1d20; --text: #ececee; --muted: #9a9aa2; --border: #303035;
+      --up: #4cc77f; --down: #ff6b6b; --mine: #3a3418; --hover: #26262a; --accent: #8ea2ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
+  .chart-wrap { position: relative; height: 340px; }
+  .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+  .controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  input[type=search] { flex: 1; min-width: 180px; padding: 8px 10px; border: 1px solid var(--border);
+                       border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 10px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--card); cursor: pointer; user-select: none; font-weight: 600; }
+  th.sorted::after { content: attr(data-dir); color: var(--muted); margin-left: 4px; }
+  td.l, th.l { text-align: left; }
+  td.uni { color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--hover); }
+  tr.mine { background: var(--mine); }
+  tr.charted td:nth-child(3) { box-shadow: inset 3px 0 0 var(--accent); }
+  .up { color: var(--up); } .down { color: var(--down); } .zero { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>CTN Leaderboard Tracker</h1>
+  <p class="sub" id="sub">Loading…</p>
+
+  <div class="card">
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+    <p class="hint">Shows the top 8 teams and your team. Click a row in the table to add or remove that team.</p>
+  </div>
+
+  <div class="card">
+    <div class="controls">
+      <input type="search" id="search" placeholder="Filter by team or university…">
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th data-key="rank">#</th>
+          <th data-key="rankChange" title="Rank change over the last 24h">Δ rank</th>
+          <th data-key="name" class="l">Team</th>
+          <th data-key="uni" class="l">University</th>
+          <th data-key="score">Score</th>
+          <th data-key="d1" title="Change since ~1 hour ago">Δ 1h</th>
+          <th data-key="d6" title="Change since ~6 hours ago">Δ 6h</th>
+          <th data-key="d24" title="Change since ~24 hours ago">Δ 24h</th>
+          <th data-key="rate" title="Average points per hour over the last 24h">pts/h</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script src="data/history.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const MY_TEAM = "Yeah";
+const TOLERANCE_MS = 15 * 60 * 1000; // snapshots land a little after the hour
+
+const H = window.HISTORY || { teams: {}, snapshots: [] };
+const snaps = H.snapshots.map(s => ({ ...s, ms: Date.parse(s.t) }));
+const latest = snaps[snaps.length - 1];
+
+const fmtTime = ms => new Date(ms).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+const fmtDelta = v => v == null ? "—" : (v > 0 ? "+" : "") + v.toLocaleString();
+const cls = v => v == null || v === 0 ? "zero" : v > 0 ? "up" : "down";
+
+// Latest snapshot taken at least `hours` before the newest one (falls back to the oldest).
+function snapshotAgo(hours) {
+  const target = latest.ms - hours * 3600e3 + TOLERANCE_MS;
+  let best = null;
+  for (const s of snaps) if (s.ms <= target && s !== latest) best = s;
+  return best || (snaps.length > 1 ? snaps[0] : null);
+}
+
+// Standard competition ranking: 1 + number of teams with a strictly higher score.
+function ranks(scores) {
+  const vals = Object.values(scores).sort((a, b) => b - a);
+  const out = {};
+  for (const [n, v] of Object.entries(scores)) out[n] = vals.findIndex(x => x === v) + 1;
+  return out;
+}
+
+let rows = [], sortKey = "rank", sortDir = 1, charted = new Set(), chart;
+
+function build() {
+  if (!latest) { document.getElementById("sub").textContent = "No data yet — run scrape.py."; return; }
+  const s1 = snapshotAgo(1), s6 = snapshotAgo(6), s24 = snapshotAgo(24);
+  const nowRanks = ranks(latest.scores), oldRanks = s24 ? ranks(s24.scores) : null;
+  const delta = (s, n) => s && n in s.scores ? latest.scores[n] - s.scores[n] : null;
+  const rateHours = s24 ? (latest.ms - s24.ms) / 3600e3 : 0;
+
+  rows = Object.entries(latest.scores).map(([name, score]) => {
+    const d24 = delta(s24, name);
+    return {
+      name, score, uni: (H.teams[name] || {}).uni || "",
+      rank: nowRanks[name],
+      rankChange: oldRanks && name in oldRanks ? oldRanks[name] - nowRanks[name] : null,
+      d1: delta(s1, name), d6: delta(s6, name), d24,
+      rate: d24 != null && rateHours > 0 ? Math.round(d24 / rateHours) : null,
+    };
+  });
+
+  const checked = H.checked_at ? ` · last checked ${fmtTime(Date.parse(H.checked_at))}` : "";
+  document.getElementById("sub").textContent =
+    `${rows.length} teams · ${snaps.length} snapshots since ${fmtTime(snaps[0].ms)} · latest update ${fmtTime(latest.ms)}${checked}`;
+
+  [...rows].sort((a, b) => a.rank - b.rank).slice(0, 8).forEach(r => charted.add(r.name));
+  if (MY_TEAM in latest.scores) charted.add(MY_TEAM);
+}
+
+function render() {
+  const q = document.getElementById("search").value.trim().toLowerCase();
+  const list = rows
+    .filter(r => !q || r.name.toLowerCase().includes(q) || r.uni.toLowerCase().includes(q))
+    .sort((a, b) => {
+      const x = a[sortKey], y = b[sortKey];
+      if (x == null) return 1; if (y == null) return -1;
+      return (typeof x === "string" ? x.localeCompare(y) : x - y) * sortDir;
+    });
+
+  const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const rc = v => v == null ? "—" : v > 0 ? `▲ ${v}` : v < 0 ? `▼ ${-v}` : "–";
+  document.getElementById("rows").innerHTML = list.map(r => `
+    <tr data-name="${esc(r.name)}" class="${r.name === MY_TEAM ? "mine" : ""} ${charted.has(r.name) ? "charted" : ""}">
+      <td>${r.rank}</td>
+      <td class="${cls(r.rankChange)}">${rc(r.rankChange)}</td>
+      <td class="l">${esc(r.name)}</td>
+      <td class="l uni" title="${esc(r.uni)}">${esc(r.uni)}</td>
+      <td>${r.score.toLocaleString()}</td>
+      <td class="${cls(r.d1)}">${fmtDelta(r.d1)}</td>
+      <td class="${cls(r.d6)}">${fmtDelta(r.d6)}</td>
+      <td class="${cls(r.d24)}">${fmtDelta(r.d24)}</td>
+      <td class="${cls(r.rate)}">${r.rate == null ? "—" : r.rate.toLocaleString()}</td>
+    </tr>`).join("");
+
+  document.querySelectorAll("th").forEach(th => {
+    th.classList.toggle("sorted", th.dataset.key === sortKey);
+    th.dataset.dir = sortDir === 1 ? "▲" : "▼";
+  });
+}
+
+const PALETTE = ["#3b5bdb", "#e8590c", "#2f9e44", "#c2255c", "#7048e8", "#1098ad", "#f08c00", "#5c940d", "#d6336c", "#495057"];
+
+function drawChart() {
+  if (!window.Chart || !latest) return;
+  const names = [...charted].sort((a, b) => latest.scores[b] - latest.scores[a]);
+  const datasets = names.map((n, i) => ({
+    label: n,
+    data: snaps.map(s => s.scores[n] ?? null),
+    borderColor: n === MY_TEAM ? "#f59f00" : PALETTE[i % PALETTE.length],
+    backgroundColor: "transparent",
+    borderWidth: n === MY_TEAM ? 3 : 2,
+    pointRadius: snaps.length > 48 ? 0 : 2,
+    tension: 0.2,
+  }));
+  const muted = getComputedStyle(document.documentElement).getPropertyValue("--muted");
+  const grid = getComputedStyle(document.documentElement).getPropertyValue("--border");
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById("chart"), {
+    type: "line",
+    data: { labels: snaps.map(s => fmtTime(s.ms)), datasets },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { position: "bottom", labels: { color: muted, boxWidth: 12 } } },
+      scales: {
+        x: { ticks: { color: muted, maxTicksLimit: 10 }, grid: { color: grid } },
+        y: { ticks: { color: muted }, grid: { color: grid } },
+      },
+    },
+  });
+}
+
+document.querySelector("thead").addEventListener("click", e => {
+  const key = e.target.closest("th")?.dataset.key;
+  if (!key) return;
+  if (key === sortKey) sortDir = -sortDir;
+  else { sortKey = key; sortDir = ["name", "uni", "rank"].includes(key) ? 1 : -1; }
+  render();
+});
+document.getElementById("rows").addEventListener("click", e => {
+  const name = e.target.closest("tr")?.dataset.name;
+  if (!name) return;
+  charted.has(name) ? charted.delete(name) : charted.add(name);
+  render(); drawChart();
+});
+document.getElementById("search").addEventListener("input", render);
+
+build(); render(); drawChart();
+</script>
+</body>
+</html>
