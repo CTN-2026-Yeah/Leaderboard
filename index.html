@@ -52,6 +52,11 @@
   .seg button.on { background: var(--accent); color: #fff; }
   .btn { border: 1px solid var(--border); border-radius: 6px; }
   .history { max-height: 420px; overflow-y: auto; margin-top: 16px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.yes { background: color-mix(in srgb, var(--up) 18%, transparent); color: var(--up); }
+  .pill.no { background: color-mix(in srgb, var(--down) 18%, transparent); color: var(--down); }
+  .pill.unknown { color: var(--muted); font-weight: 400; }
+  .seg .count { opacity: .7; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -93,6 +98,7 @@
   <div class="card">
     <div class="controls">
       <input type="search" id="search" placeholder="Filter by team or university…">
+      <div class="seg" id="vote-filter" title="Vote inferred from the +6,000 bonus on 25/10"></div>
     </div>
     <div class="scroll">
       <table>
@@ -100,6 +106,7 @@
           <th data-key="rank">#</th>
           <th data-key="rankChange" title="Rank change over the last 24h">Δ rank</th>
           <th data-key="name" class="l">Team</th>
+          <th data-key="vote" class="l" title="Inferred from the +6,000 bonus on 25/10">Vote</th>
           <th data-key="uni" class="l">University</th>
           <th data-key="score">Score</th>
           <th data-key="d1" title="Change since ~1 hour ago">Δ 1h</th>
@@ -121,6 +128,10 @@
 <script>
 const MY_TEAM = "Yeah";
 const TOLERANCE_MS = 15 * 60 * 1000; // snapshots land a little after the hour
+
+// Referendum vote, inferred from the one-off bonus on 25/10 07:15 AEDT: teams that got exactly
+// +6,000 voted Yes; teams already above 7,000 points that didn't get it voted No; the rest are unknown.
+const VOTE_EVENT = "2026-10-24T20:15:26Z", VOTE_BONUS = 6000, VOTE_MIN_SCORE = 7000;
 
 const H = window.HISTORY || { teams: {}, snapshots: [] };
 const snaps = H.snapshots.map(s => ({ ...s, ms: Date.parse(s.t) }));
@@ -147,7 +158,21 @@ function ranks(scores) {
   return out;
 }
 
-let rows = [], sortKey = "rank", sortDir = 1, charted = new Set(), chart;
+function inferVotes() {
+  const i = snaps.findIndex(s => s.t === VOTE_EVENT);
+  if (i < 1) return {};
+  const before = snaps[i - 1].scores, after = snaps[i].scores, votes = {};
+  for (const n of Object.keys(latest.scores)) {
+    if (after[n] - before[n] === VOTE_BONUS) votes[n] = "Yes";
+    else if (before[n] > VOTE_MIN_SCORE) votes[n] = "No";
+    else votes[n] = "Unknown";
+  }
+  return votes;
+}
+
+let rows = [], votes = {}, voteFilter = "All", sortKey = "rank", sortDir = 1, charted = new Set(), chart;
+const VOTE_ORDER = { Yes: 0, No: 1, Unknown: 2 };
+const votePill = v => v ? `<span class="pill ${v.toLowerCase()}">${v}</span>` : "";
 
 function build() {
   if (!latest) { document.getElementById("sub").textContent = "No data yet — run scrape.py."; return; }
@@ -155,11 +180,12 @@ function build() {
   const nowRanks = ranks(latest.scores), oldRanks = s24 ? ranks(s24.scores) : null;
   const delta = (s, n) => s && n in s.scores ? latest.scores[n] - s.scores[n] : null;
   const rateHours = s24 ? (latest.ms - s24.ms) / 3600e3 : 0;
+  votes = inferVotes();
 
   rows = Object.entries(latest.scores).map(([name, score]) => {
     const d24 = delta(s24, name);
     return {
-      name, score, uni: (H.teams[name] || {}).uni || "",
+      name, score, uni: (H.teams[name] || {}).uni || "", vote: votes[name] || "",
       rank: nowRanks[name],
       rankChange: oldRanks && name in oldRanks ? oldRanks[name] - nowRanks[name] : null,
       d1: delta(s1, name), d6: delta(s6, name), d24,
@@ -179,7 +205,9 @@ function render() {
   const q = document.getElementById("search").value.trim().toLowerCase();
   const list = rows
     .filter(r => !q || r.name.toLowerCase().includes(q) || r.uni.toLowerCase().includes(q))
+    .filter(r => voteFilter === "All" || r.vote === voteFilter)
     .sort((a, b) => {
+      if (sortKey === "vote") return ((VOTE_ORDER[a.vote] ?? 3) - (VOTE_ORDER[b.vote] ?? 3)) * sortDir || a.rank - b.rank;
       const x = a[sortKey], y = b[sortKey];
       if (x == null) return 1; if (y == null) return -1;
       return (typeof x === "string" ? x.localeCompare(y) : x - y) * sortDir;
@@ -192,6 +220,7 @@ function render() {
       <td>${r.rank}</td>
       <td class="${cls(r.rankChange)}">${rc(r.rankChange)}</td>
       <td class="l"><a href="#team=${encodeURIComponent(r.name)}" title="Show full history">${esc(r.name)}</a></td>
+      <td class="l">${votePill(r.vote)}</td>
       <td class="l uni" title="${esc(r.uni)}">${esc(r.uni)}</td>
       <td>${r.score.toLocaleString()}</td>
       <td class="${cls(r.d1)}">${fmtDelta(r.d1)}</td>
@@ -269,7 +298,8 @@ function showDetail() {
   const info = H.teams[name] || {};
   document.getElementById("d-name").textContent = name;
   document.getElementById("d-meta").textContent =
-    [info.uni, info.members ? `${info.members} member${info.members > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · ");
+    [info.uni, info.members ? `${info.members} member${info.members > 1 ? "s" : ""}` : "",
+     votes[name] ? `Vote: ${votes[name]}` : ""].filter(Boolean).join(" · ");
   document.querySelectorAll("#d-range button").forEach(b => b.classList.toggle("on", +b.dataset.h === detailHours));
 
   const hist = teamHistory(name);
@@ -360,7 +390,22 @@ document.getElementById("rows").addEventListener("click", e => {
 });
 document.getElementById("search").addEventListener("input", render);
 
-build(); render(); drawChart(); showDetail();
+function renderVoteFilter() {
+  const counts = { All: rows.length, Yes: 0, No: 0, Unknown: 0 };
+  rows.forEach(r => r.vote && counts[r.vote]++);
+  const el = document.getElementById("vote-filter");
+  el.hidden = !Object.keys(votes).length;
+  el.innerHTML = Object.entries(counts).map(([k, n]) =>
+    `<button data-v="${k}" class="${k === voteFilter ? "on" : ""}">${k} <span class="count">${n}</span></button>`).join("");
+}
+document.getElementById("vote-filter").addEventListener("click", e => {
+  const v = e.target.closest("button")?.dataset.v;
+  if (!v) return;
+  voteFilter = v;
+  renderVoteFilter(); render();
+});
+
+build(); renderVoteFilter(); render(); drawChart(); showDetail();
 </script>
 </body>
 </html>
